@@ -1,82 +1,73 @@
-# Odds Board: a stock move probability model
+# Odds Board v2
 
-For each stock, Odds Board estimates:
+A research dashboard that estimates, for the **top 40 quality large caps plus your watchlist**:
 
-- the chance of a higher or lower close in 1 day, 1 week and 1 month
-- the expected (median) move and an 80% range
-- the chance of gaining more than +5%, +10% or +20% within the period
+- the probability of rising or falling over **1 day, 1 week, 1 month and 3 months**
+- the expected change and an 80% uncertainty band for each horizon
+- a **confidence level**, earned from the model's own track record on similar past calls
+- a risk rating (1–10), an illustrative position size and a risk/reward ratio
 
-It then writes a dashboard with charts, factor explanations, risk flags, a big-move scanner and full backtest results.
+It then builds five top-20 lists (drawn from the ~60 stocks covered): **low-risk growth**, **highest probability**, **momentum**, **long-term compounders** and **next-30-day opportunities**. The backtest, feature importance and component weights are all shown.
 
-> **Read this first.** Short-term stock moves are mostly noise. Good models usually reach 51–56% directional accuracy. This model shows its own out-of-sample record, and it shrinks every probability toward the historical base rate unless the backtest proves skill. It is not financial advice.
+> **Illustrative research, not investment advice.** Short-term returns are mostly noise. The model is built to be *reliable* rather than to promise accuracy. It publishes a forecast only when its backtested record in similar setups supports one, and it shows every miss in the Backtest tab.
 
-## What goes into it
+## What changed from v1
 
-| Factor | How it's used | Backtested? |
+| Area | v1 | v2 |
 |---|---|---|
-| Price & volume history (OHLCV) | 118 features: returns, volatility, RSI, MACD, Bollinger Bands, moving averages, stochastics, ATR, ADX, CCI, OBV, money flow | Yes |
-| Chart patterns | Rule-based detection: double tops/bottoms, head & shoulders (and inverse), cup & handle, flags, triangles, breakouts, support/resistance, trend lines | Yes |
-| Sector & market | Relative strength vs sector ETF and S&P 500, beta, index trends (S&P, Nasdaq, Dow, Russell) | Yes |
-| Rates, volatility & commodities | VIX, 10-yr and 3-month yields, yield curve, oil, gold, dollar, high-yield credit | Yes |
-| Macroeconomic | CPI inflation, unemployment, fed funds, consumer sentiment, GDP (FRED, lagged to release dates) | Yes |
-| Earnings calendar | Days to and since earnings; the range widens when earnings fall inside the window | Yes |
-| News sentiment | Recent headlines scored with VADER | No (live overlay) |
-| Analyst ratings | Target price vs current price, net up/downgrades in 30 days, consensus rating | No (live overlay) |
-| Options market | Put/call ratios, implied vs realised volatility, unusual activity | No (live overlay) |
-| Institutional & insider | Institutional ownership, net insider buying/selling in 6 months | No (live overlay) |
+| Universe | 23-stock watchlist | S&P 500 + Nasdaq-100 + Dow 30 + global blue chips, quality-screened (market cap ≥ $30B, profitable, positive FCF, moderate debt), top 40 by quality, plus your watchlist |
+| Horizons | 1d / 1w / 1m | + 3 months |
+| Model | one boosted-tree + logistic blend | 6-component ensemble: 5 stock-selection components (technical, relative strength, earnings, time-series, linear all-factor) predict *beating the average stock*; 1 market-timing component (regime, breadth, macro) |
+| Weighting | fixed | each component earns weight from its out-of-sample record (the worse of recent and full-history AUC); failing components are switched off automatically |
+| New evidence | – | market regime (bull/bear/sideways, volatility), breadth, sector rotation, EPS surprises and beat streaks, recession signals, 12-1 momentum, cross-sectional ranks |
+| Backtest | 2 years | ~8 years walk-forward (2018 Q4, 2020 crash, 2022 bear, 2025 sell-off) with results by condition: bull, bear, sideways, high volatility, earnings season, downturn |
+| Metrics | accuracy, AUC | + precision, recall, ranking AUC, Brier skill, published-call accuracy, band coverage, Sharpe, max drawdown, win rate, long-short spread |
+| Confidence | simple | High/Medium only when the stock ranks in the top/bottom of the universe *and* past calls from that bucket beat their base rate. Low forecasts are not published |
+| Fundamentals | – | growth, profitability, cash flow, balance sheet, stability and valuation scores (0–100) |
+| Coverage fix | FLT.V / MDA.TO missing | alternative Yahoo symbols tried automatically |
+| Schedule | once a day | pre-open + post-close (fast), plus a weekly full rebuild |
 
-**Models:** gradient-boosted trees plus logistic regression for direction (isotonic-calibrated), gradient-boosted quantile regression for the move range, and one classifier per gain threshold. All data is pooled across your tickers.
+## How the runs work
 
-**Backtest:** an expanding-window walk-forward test. The model retrains quarterly and uses an embargo equal to the horizon, so it never sees an outcome it's predicting. Reported metrics: accuracy vs naive, AUC, Brier skill, calibration curve, quintile returns, 80%-range coverage, big-gain AUC and a simple signal equity curve. Feature importance is permutation-based.
+- **Full run** (Saturdays, or manually): refreshes the universe and fundamentals, runs the multi-cycle backtest, and saves the model's track record, weights and calibration to `model_state/`. It takes about 30–60 minutes on GitHub.
+- **Daily run** (8:15 AM and 4:30 PM New York time on weekdays): downloads fresh prices and earnings, retrains the final models, reuses the saved track record and publishes the dashboard. It takes about 5–15 minutes.
+- **The first run** is automatically a full run, because there's no saved state yet.
 
-**Live overlays** can't be backtested with free data, so each can shift the probability only by a small, capped amount. You can change these weights in `config.py`.
+## Upgrading your GitHub repo from v1
 
-## Option A: run it on your computer
+1. In your repo, delete the old files: `features.py`, `model.py`, `report.py`, `run.py`, `dashboard.py`, `config.py`, `data.py`, `overlays.py`, `streamlit_app.py`, `requirements.txt`, `README.md`. For each one, open it, click the ⋯ menu, then **Delete file**.
+2. **Add file → Upload files**, and drag in every `.py` file plus `requirements.txt` and `README.md` from this folder.
+3. Open `.github/workflows/daily.yml`, click the pencil, **replace its whole contents** with the new `daily.yml`, and commit.
+4. Go to **Actions → Odds Board → Run workflow**, choose **full**, then **Run workflow**. Wait for the green tick (about 30–60 minutes).
+5. Open your site as before: `https://<username>.github.io/<repo>/`
+
+## Settings (`config.py`)
+
+| Setting | What it does |
+|---|---|
+| `WATCHLIST` | Your names, always included |
+| `MIN_MARKET_CAP`, `SCREEN`, `MAX_UNIVERSE` | The quality screen and universe size (currently 40; larger = broader lists but slower runs) |
+| `HORIZONS`, `PRIMARY_HORIZON` | Forecast horizons; the primary one drives sizing and the 30-day list |
+| `CONFIDENCE` | Thresholds for High/Medium; raise them to publish fewer, stronger calls |
+| `POSITION` | Illustrative sizing rule: risk per idea, max weight, confidence multipliers |
+| `OVERLAY_WEIGHTS`, `LIVE_SIGNAL_LIMIT` | How much news, analyst, options and insider data may nudge a probability, and for how many stocks it's fetched |
+| `HISTORY_YEARS`, `RETRAIN_EVERY`, `TRAIN_SAMPLE_EVERY` | Backtest depth and speed |
+
+## Honest limits
+
+- **Stock-selection skill is small.** A ranking AUC of 0.52–0.55 is already a good result. Accuracy vs "always up" often looks poor, because markets rise most of the time; judge the model on published-call accuracy and ranking AUC.
+- **Fundamentals are today's snapshot.** They're used for the screen, the quality scores and the lists, but not inside the backtested model, because that would leak future information. EPS surprises *are* point-in-time and are backtested.
+- **News, analyst, options and insider signals** can't be backtested with free data. Their effect is small and capped.
+- **The universe has survivorship bias.** Today's index members survived. Treat backtest returns as optimistic.
+- **Costs are not modelled.** Transaction costs, taxes and slippage aren't included.
+
+## Run locally
 
 ```bash
 pip install -r requirements.txt
-python run.py                      # full run on your watchlist (≈10–20 min with backtest)
-python run.py --no-backtest        # faster (≈3–5 min)
-python run.py --tickers NVDA AMD MU
-python run.py --demo               # synthetic data, no internet needed
+python run.py --mode full     # first time
+python run.py --mode daily    # afterwards
+python run.py --demo          # synthetic data, no internet
 ```
 
-Then open `site/index.html` in your browser.
-
-## Option B: automatic daily web page (GitHub Actions + Pages, free)
-
-1. Create a free account at github.com, then create a **new repository** (e.g. `stock-predictor`). It can be private if you have GitHub Pro; otherwise Pages needs a public repo.
-2. Upload every file in this folder, including the hidden `.github/workflows/daily.yml` file. Use **Add file → Upload files** and drag the whole folder in.
-3. Go to **Settings → Pages** and under *Source* choose **GitHub Actions**.
-4. Go to **Settings → Actions → General → Workflow permissions** and choose **Read and write permissions**.
-5. Go to the **Actions** tab, open **Daily predictions** and press **Run workflow**.
-
-The first run takes about 15–20 minutes. Your dashboard will then be at `https://<your-username>.github.io/<repo-name>/`. After that it refreshes automatically at 8:15 AM New York time on weekdays. To change the time, edit the `cron` line.
-
-## Option C: interactive web app (Streamlit Community Cloud, free)
-
-1. Complete step 1–2 of option B (the code must be in a GitHub repo).
-2. Go to share.streamlit.io, sign in with GitHub and choose **Create app**.
-3. Pick your repo, set the main file to `streamlit_app.py` and deploy.
-
-You get a URL where you can type any tickers and press **Run**. If the GitHub workflow is also set up, the app shows the latest daily run until you start a new one.
-
-## Customising
-
-- **Watchlist, sector ETFs, horizons, thresholds, overlay weights:** edit `config.py`.
-- **Canadian listings** use Yahoo suffixes: `MDA.TO`, `FLT.V`. `PHOS` is the Nasdaq ADR.
-- **A new feature:** add a column in `features.py` with one of the family prefixes (`tech_`, `pat_`, `rel_`, `mkt_`, `x_`, `macro_`, `earn_`, `ts_`). It's picked up automatically.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `config.py` | All settings |
-| `data.py` | Yahoo Finance and FRED downloads, plus the synthetic demo data |
-| `features.py` | Indicators, chart patterns, relative strength, market and macro features, targets |
-| `model.py` | Models, walk-forward backtest, feature importance |
-| `overlays.py` | News, analyst, options and institutional signals |
-| `report.py` | Predictions, explanations, risk, outlooks, rankings |
-| `dashboard.py` | Self-contained HTML dashboard (no external chart libraries) |
-| `run.py` | Command-line entry point |
-| `streamlit_app.py` | Web app |
+Open `site/index.html` in your browser.

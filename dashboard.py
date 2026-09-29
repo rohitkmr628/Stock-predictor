@@ -1,14 +1,13 @@
-"""Write a self-contained HTML dashboard from results.json data."""
+"""Write the self-contained Odds Board v2 dashboard (no external chart libraries)."""
 from __future__ import annotations
 
 import json
 
 
 def write(results: dict, path: str) -> None:
-    payload = json.dumps(results, default=str).replace("</", "<\\/")
-    html = TEMPLATE.replace("__DATA__", payload)
+    payload = json.dumps(results, default=str, allow_nan=False).replace("</", "<\\/")
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(html)
+        fh.write(TEMPLATE.replace("__DATA__", payload))
 
 
 TEMPLATE = r"""<!doctype html>
@@ -96,6 +95,23 @@ a{color:var(--accent)}
 .rank li{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}
 .rank{list-style:none;margin:8px 0 0;padding:0}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+.g4{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+tr.dim td{opacity:.5} .dimcard{opacity:.62}
+.regime{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin-bottom:12px}
+.rchip{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:600;font-size:12px;background:var(--soft);color:var(--ink2)}
+.r-Bull{background:var(--up-soft);color:var(--up)} .r-Bear{background:var(--down-soft);color:var(--down)} .r-Sideways{background:var(--warn-soft);color:var(--warn)} .r-hv{background:var(--down-soft);color:var(--down)}
+.chk{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:var(--ink2)}
+input[type=search]{font:14px "IBM Plex Sans",sans-serif;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);min-width:0;width:220px;max-width:100%}
+td.nm{max-width:220px;overflow:hidden;text-overflow:ellipsis} td.why{white-space:normal;min-width:240px;max-width:420px;color:var(--ink2)}
+.dh{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px}
+.dhk{display:flex;flex-wrap:wrap;gap:8px 22px} .dhk div{display:flex;flex-direction:column} .dhk b{font-size:17px}
+.hh{display:flex;justify-content:space-between;align-items:center} .pud{display:flex;justify-content:space-between;align-items:baseline;margin-top:6px}
+.setup{margin-top:8px;padding:8px;border-radius:8px;background:var(--soft);font-size:12.5px;color:var(--ink2)}
+.wrapseg{flex-wrap:wrap} a.tk{text-decoration:none;color:var(--accent)}
+.pbar .mid{background:var(--ink)}
+
+#evid td[colspan]{white-space:normal}
 </style>
 </head>
 <body>
@@ -105,84 +121,99 @@ a{color:var(--accent)}
       <h1>Odds Board</h1>
       <div class="sub" id="meta"></div>
     </div>
-    <div class="note" style="max-width:480px">Probabilities from a backtested model, not advice. Stock moves are mostly noise; read the Backtest tab before trusting any number.</div>
+    <div class="note" style="max-width:520px">Model probabilities with backtested track records. Illustrative research, not investment advice. Forecasts below the confidence threshold are shown greyed out.</div>
   </header>
   <div id="demo"></div>
+  <div class="regime" id="regime"></div>
   <div class="strip" id="strip"></div>
   <nav class="tabs" role="tablist">
-    <button role="tab" aria-selected="true" data-tab="overview">Overview</button>
+    <button role="tab" aria-selected="true" data-tab="picks">Top lists</button>
+    <button role="tab" aria-selected="false" data-tab="screener">Screener</button>
     <button role="tab" aria-selected="false" data-tab="detail">Stock detail</button>
-    <button role="tab" aria-selected="false" data-tab="scanner">Big-move scanner</button>
-    <button role="tab" aria-selected="false" data-tab="backtest">Backtest &amp; model</button>
+    <button role="tab" aria-selected="false" data-tab="backtest">Backtest</button>
+    <button role="tab" aria-selected="false" data-tab="model">Model &amp; method</button>
   </nav>
 
-  <section id="tab-overview">
+  <section id="tab-picks">
+    <div class="bar"><div class="seg wrapseg" id="listseg"></div></div>
+    <p class="lead" id="listdesc"></p>
+    <div class="panel tbl"><table id="listt"></table></div>
+  </section>
+
+  <section id="tab-screener" hidden>
     <div class="bar">
-      <div class="seg" id="hz-overview"></div>
-      <span class="note">Click a column to sort · click a row for details</span>
+      <div class="seg" id="hz-scr"></div>
+      <select id="f-group" aria-label="Group"></select>
+      <select id="f-sort" aria-label="Rank by">
+        <option value="p_up">Rank: highest probability</option>
+        <option value="risk_adj">Rank: best risk-adjusted return</option>
+        <option value="conf">Rank: highest confidence</option>
+        <option value="downside">Rank: lowest downside risk</option>
+        <option value="quality">Rank: strongest fundamentals</option>
+        <option value="gs">Rank: growth + stability</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="f-pub"> Published forecasts only</label>
+      <input id="f-q" type="search" placeholder="Search ticker or name" aria-label="Search">
     </div>
-    <div class="panel tbl"><table id="ovt"></table></div>
+    <div class="note" id="scr-count" style="margin-bottom:6px"></div>
+    <div class="panel tbl"><table id="scrt"></table></div>
   </section>
 
   <section id="tab-detail" hidden>
-    <div class="bar">
-      <select id="pick" aria-label="Stock"></select>
-      <div class="seg" id="hz-detail"></div>
-    </div>
+    <div class="bar"><select id="pick" aria-label="Stock"></select><div class="seg" id="hz-det"></div></div>
     <div class="stack">
-      <div class="grid g3" id="hcards"></div>
+      <div class="panel" id="dhead"></div>
+      <div class="grid g4" id="hcards"></div>
       <div class="grid g2">
-        <div class="panel"><h3>Price, moving averages, support &amp; resistance</h3><div class="chart"><div class="svgc" id="c-price"></div></div></div>
-        <div class="panel"><h3 id="dist-title">Probability distribution</h3><div class="chart"><div class="svgc" id="c-dist"></div></div><div class="note" id="dist-note"></div></div>
+        <div class="panel"><h3>Price, 50/200-day averages, support &amp; resistance</h3><div class="chart"><div class="svgc" id="c-price"></div></div></div>
+        <div class="panel"><h3 id="dist-title">Forecast distribution</h3><div class="chart"><div class="svgc" id="c-dist"></div></div><div class="note" id="dist-note"></div></div>
       </div>
       <div class="grid g2">
-        <div class="panel"><h3>Outlook</h3><p class="lead" id="o-short"></p><p class="lead" id="o-med"></p><p class="note" id="o-why"></p></div>
-        <div class="panel"><h3>Risk assessment</h3><div id="risk"></div></div>
+        <div class="panel"><h3 class="pos">Key bullish factors</h3><ul class="f" id="bull"></ul></div>
+        <div class="panel"><h3 class="neg">Key bearish factors</h3><ul class="f" id="bear"></ul></div>
       </div>
       <div class="grid g2">
-        <div class="panel"><h3 class="pos">Bullish factors</h3><ul class="f" id="bull"></ul></div>
-        <div class="panel"><h3 class="neg">Bearish factors</h3><ul class="f" id="bear"></ul></div>
-      </div>
-      <div class="grid g2">
-        <div class="panel"><h3>What moved this prediction (factor groups)</h3><div class="chart sm"><div class="svgc" id="c-fam"></div></div></div>
+        <div class="panel"><h3>Evidence by model component</h3><div class="tbl"><table id="evid"></table></div><p class="note">Each component's own probability and the weight its backtest earned. Weight 0 = switched off for underperforming.</p></div>
         <div class="panel"><h3>Top individual drivers</h3><div class="tbl"><table id="drivers"></table></div></div>
       </div>
-      <div class="panel"><h3>Live signals (not backtested)</h3><div class="grid g2" id="live" style="margin-top:8px"></div></div>
+      <div class="grid g2">
+        <div class="panel"><h3>Fundamental quality (0–100, vs universe)</h3><div class="chart sm"><div class="svgc" id="c-qual"></div></div><dl class="kv" id="fundkv" style="margin-top:10px"></dl></div>
+        <div class="panel"><h3>Live signals (not backtested, small capped effect)</h3><div id="live"></div></div>
+      </div>
     </div>
-  </section>
-
-  <section id="tab-scanner" hidden>
-    <div class="bar"><div class="seg" id="hz-scanner"></div><span class="note">Chance the price closes above each threshold at any point within the period</span></div>
-    <div class="grid g3" id="gainlists"></div>
-    <div class="panel tbl" style="margin-top:14px"><h3 style="margin-bottom:8px">Ranked by risk-adjusted expected return (median move ÷ predicted volatility)</h3><table id="rat"></table></div>
   </section>
 
   <section id="tab-backtest" hidden>
     <div class="stack">
-      <div class="panel"><h2>How well did it work out of sample?</h2>
-        <p class="lead" id="bt-summary"></p>
+      <div class="panel"><h2>Out-of-sample track record</h2><p class="lead" id="bt-lead"></p>
         <div class="tbl"><table id="btt"></table></div>
-        <p class="note">Walk-forward test: the model is retrained every quarter and only ever predicts dates it has not seen, with a gap equal to the horizon so outcomes never leak. "Naive" always guesses the more common direction.</p>
+        <p class="note">Walk-forward: retrained every ~6 months on data up to that point only, with a gap equal to the horizon. Up/down calls are judged against the historical up-rate (not 50%). "Published" = Medium or High confidence. Ranking AUC measures how well it orders stocks against each other on the same day (0.50 = no skill).</p>
       </div>
       <div class="bar"><div class="seg" id="hz-bt"></div></div>
+      <div class="panel"><h3>By market condition</h3><div class="tbl"><table id="segt"></table></div></div>
+      <div class="grid g2">
+        <div class="panel"><h3>Signal portfolio vs equal-weight universe</h3><div class="chart"><div class="svgc" id="c-eq"></div></div><div class="tbl"><table id="stratt"></table></div><p class="note">Long-only, equal-weight published bullish calls, rebalanced every horizon, no costs, risk-free rate 0. Illustrative.</p></div>
+        <div class="panel"><h3>Signal portfolio drawdown</h3><div class="chart"><div class="svgc" id="c-dd"></div></div></div>
+      </div>
+      <div class="grid g2">
+        <div class="panel"><h3>Components: earned weights (auto-reweighting)</h3><div class="tbl"><table id="compt"></table></div></div>
+        <div class="panel"><h3>Component weights over time</h3><div class="chart"><div class="svgc" id="c-wh"></div></div></div>
+      </div>
       <div class="grid g2">
         <div class="panel"><h3>Calibration: predicted vs actual chance of rising</h3><div class="chart"><div class="svgc" id="c-cal"></div></div></div>
-        <div class="panel"><h3>Average forward return by prediction quintile</h3><div class="chart"><div class="svgc" id="c-quint"></div></div><div class="note">If the model ranks well, quintile 5 (most bullish) should beat quintile 1.</div></div>
+        <div class="panel"><h3>Big-move probabilities: predicted vs actual</h3><div class="tbl"><table id="gaint"></table></div><p class="note">Chance of closing above +5/10/20% at any point within the horizon.</p></div>
       </div>
+    </div>
+  </section>
+
+  <section id="tab-model" hidden>
+    <div class="stack">
       <div class="grid g2">
-        <div class="panel"><h3>Signal check: names with P(up) &gt; 55% vs equal-weight all</h3><div class="chart"><div class="svgc" id="c-eq"></div></div><div class="note">Non-overlapping periods, no costs or slippage. Illustrative only.</div></div>
         <div class="panel"><h3>Feature importance by factor group</h3><div class="chart"><div class="svgc" id="c-impfam"></div></div></div>
+        <div class="panel"><h3>How to read confidence and sizing</h3><div id="rules"></div></div>
       </div>
-      <div class="panel"><h3>Top 20 features (drop in AUC when shuffled)</h3><div class="chart" style="height:460px"><div class="svgc" id="c-imp"></div></div></div>
-      <div class="panel"><h2>Method</h2>
-        <ul class="f">
-          <li><b>Data:</b> daily OHLCV, sector ETFs, S&amp;P 500 / Nasdaq / Dow / Russell, VIX, Treasury yields, oil, gold, dollar, credit, and FRED macro (CPI, unemployment, fed funds, consumer sentiment, GDP) lagged to release dates.</li>
-          <li><b>Features:</b> <span id="nfeat"></span> indicators including RSI, MACD, Bollinger Bands, moving averages, stochastics, ATR, ADX, volume flow, trend-line regressions, rule-based chart patterns (double tops/bottoms, head &amp; shoulders, cup &amp; handle, flags, triangles, breakouts, support/resistance), relative strength vs sector and market, and an EWMA volatility forecast.</li>
-          <li><b>Models:</b> gradient-boosted trees + logistic regression for direction (isotonic-calibrated), gradient-boosted quantile regression for the 10th/50th/90th percentile move, and one classifier per gain threshold.</li>
-          <li><b>Honesty controls:</b> each prediction is shrunk toward the historical base rate in proportion to the model's out-of-sample AUC, and the move range is rescaled so it would have held 80% of outcomes in the backtest.</li>
-          <li><b>Live overlays:</b> news sentiment, analyst targets and rating changes, options put/call and unusual activity, and insider/institutional data nudge the probability by a small capped amount. They are not backtested.</li>
-        </ul>
-      </div>
+      <div class="panel"><h3>Top 25 features (drop in AUC when shuffled, 1-month model)</h3><div class="chart" style="height:560px"><div class="svgc" id="c-imp"></div></div></div>
+      <div class="panel"><h2>Method</h2><ul class="f" id="method"></ul></div>
     </div>
   </section>
 </div>
@@ -190,14 +221,16 @@ a{color:var(--accent)}
 <script>
 const R = __DATA__;
 const HZ = Object.keys(R.horizons);
-const HZNAME = {"1d":"1 day","1w":"1 week","1m":"1 month"};
-const state = {ov:"1w", det:"1w", scan:"1m", bt:"1w", sort:{k:"p_up", dir:-1}, pick: R.predictions[0]?.ticker};
+const HZNAME = {"1d":"1 day","1w":"1 week","1m":"1 month","3m":"3 months"};
+const state = {list:"opportunities_30d", scr:R.primary||"1m", det:R.primary||"1m", bt:R.primary||"1m", pick:(R.predictions[0]||{}).ticker, sortDir:-1};
 const $ = s => document.querySelector(s);
-const pct = (v,d=1,s=true) => v==null||isNaN(v) ? "n/a" : (s&&v>0?"+":"") + (v*100).toFixed(d) + "%";
-const cls = v => v>0 ? "pos" : v<0 ? "neg" : "";
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-
+const pct = (v,d=1,s=true) => v==null||isNaN(v) ? "n/a" : (s&&v>0?"+":"") + (v*100).toFixed(d) + "%";
+const cls = v => v>0 ? "pos" : v<0 ? "neg" : "";
+const fmtCap = v => v==null ? "n/a" : v>=1e12 ? "$"+(v/1e12).toFixed(2)+"T" : "$"+(v/1e9).toFixed(0)+"B";
+const P = Object.fromEntries(R.predictions.map(p => [p.ticker, p]));
+const COMPLABEL = {}; Object.values(R.backtest).forEach(b => (b.components||[]).forEach(c => COMPLABEL[c.key]=c.label));
 // ---- tiny SVG chart kit (no external libraries) ----
 const NS="http://www.w3.org/2000/svg";
 const tip=document.createElement("div"); tip.className="tip"; tip.hidden=true; document.body.appendChild(tip);
@@ -259,140 +292,190 @@ function calChart(id, pts){
   pts.forEach(p=>{ const c=el("circle",{cx:X(p.pred),cy:Y(p.actual),r:5,fill:css("--accent")},svg); c.addEventListener("mousemove",e=>showTip(e,`predicted ${(p.pred*100).toFixed(1)}% · actual ${(p.actual*100).toFixed(1)}% · n=${p.n}`)); c.addEventListener("mouseleave",hideTip); });
   legend(host,[{label:"Model",color:css("--accent")},{label:"Perfect calibration",color:css("--ink3")}]);
 }
-// header
-$("#meta").textContent = `Data as of ${R.data_date} · generated ${R.generated} · ${R.predictions.length} stocks · ${R.n_features} features`;
-if (R.demo) $("#demo").innerHTML = `<div class="banner"><b>Demo run on synthetic data.</b> Tickers and prices are simulated to show the layout and verify the pipeline. Run <span class="mono">python run.py</span> (or the GitHub workflow) for real predictions.</div>`;
-$("#strip").innerHTML = (R.market||[]).map(m => `<div class="tick"><div class="n">${esc(m.name)}</div><div class="v num">${m.last.toLocaleString(undefined,{maximumFractionDigits:2})}</div><div class="num ${cls(m.chg1d)}" style="font-size:12px">${pct(m.chg1d,2)} 1d · <span class="${cls(m.chg1m)}">${pct(m.chg1m,1)} 1m</span></div></div>`).join("");
-$("#nfeat").textContent = R.n_features;
 
-// tabs
+
+// ---------- header
+$("#meta").textContent = `Data as of ${R.data_date} · generated ${R.generated} (${R.mode} run) · backtest ${R.backtest_generated||"n/a"} · ${R.predictions.length} stocks · ${R.n_features} features`;
+if (R.demo) $("#demo").innerHTML = `<div class="banner"><b>Demo run on synthetic data.</b> Companies and prices are simulated to verify the pipeline and show the layout.</div>`;
+const rg = R.regime_now||{};
+$("#regime").innerHTML = `<span class="rchip r-${esc(rg.regime)}">${esc(rg.regime)} market</span><span class="rchip ${rg.high_vol?"r-hv":""}">${rg.high_vol?"High volatility":"Normal volatility"}</span>
+  <span class="note">S&amp;P 500 ${pct(rg.spx_drawdown,1)} from 1-yr high · ${rg.breadth_above200==null?"":(rg.breadth_above200*100).toFixed(0)+"% of stocks above 200-day avg"} · VIX ${rg.vix==null?"n/a":rg.vix.toFixed(1)} · universe: ${R.universe?.universe??"?"} stocks screened from ${R.universe?.candidates??"?"}</span>`;
+$("#strip").innerHTML = (R.market||[]).map(m => `<div class="tick"><div class="n">${esc(m.name)}</div><div class="v num">${m.last.toLocaleString(undefined,{maximumFractionDigits:2})}</div><div class="num" style="font-size:12px"><span class="${cls(m.chg1d)}">${pct(m.chg1d,2)} 1d</span> · <span class="${cls(m.chg1m)}">${pct(m.chg1m,1)} 1m</span></div></div>`).join("");
+
+// ---------- tabs
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 function showTab(t){
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab===t));
-  ["overview","detail","scanner","backtest"].forEach(x => $("#tab-"+x).hidden = x!==t);
-  if (t==="detail") renderDetail(); if (t==="backtest") renderBacktest(); if (t==="scanner") renderScanner();
+  ["picks","screener","detail","backtest","model"].forEach(x => $("#tab-"+x).hidden = x!==t);
+  ({picks:renderList, screener:renderScreener, detail:renderDetail, backtest:renderBacktest, model:renderModel})[t]();
   try{ history.replaceState(null,"","#"+t) }catch(e){}
 }
-function seg(id, key, cb){
+function seg(id, key, cb, opts=HZ, names=HZNAME){
   const el = $(id);
-  el.innerHTML = HZ.map(h => `<button aria-pressed="${state[key]===h}" data-h="${h}">${HZNAME[h]}</button>`).join("");
-  el.querySelectorAll("button").forEach(b => b.onclick = () => { state[key]=b.dataset.h; seg(id,key,cb); cb(); });
+  el.innerHTML = opts.map(h => `<button aria-pressed="${state[key]===h}" data-h="${h}">${names[h]}</button>`).join("");
+  el.querySelectorAll("button").forEach(b => b.onclick = () => { state[key]=b.dataset.h; seg(id,key,cb,opts,names); cb(); });
+}
+const pill = c => `<span class="pill ${c}">${c}</span>`;
+function pbar(p, base){ return `<span class="pbar"><span class="num">${(p*100).toFixed(0)}%</span><span class="track"><span class="fill" style="width:${p*100}%"></span>${base!=null?`<span class="mid" style="left:${base*100}%"></span>`:""}</span></span>`; }
+const tickCell = t => `<a href="#detail" class="tk" data-go="${esc(t)}">${esc(t)}</a>`;
+function wireGo(root){ root.querySelectorAll("[data-go]").forEach(a => a.onclick = e => { e.preventDefault(); state.pick=a.dataset.go; $("#pick").value=state.pick; showTab("detail"); }); }
+
+// ---------- top lists
+const LISTS = {
+  opportunities_30d: ["Next 30 days", "Published bullish 1-month forecasts (Medium/High confidence), ranked by edge over the base rate × confidence, adjusted for risk. Empty means nothing cleared the bar today."],
+  highest_probability: ["Highest probability", "Highest chance of a higher price in 1 month. Published forecasts come first; greyed rows are below the confidence threshold."],
+  low_risk_growth: ["Low-risk growth", "Risk rating ≤ 4/10 with above-median growth, ranked by growth, quality and low risk, nudged by the 3-month outlook."],
+  momentum: ["Momentum", "Stocks in uptrends ranked by 12-1 month momentum, 3-month relative strength, distance above the 200-day average and 6-month Sharpe. A factual screen, not a forecast."],
+  compounders: ["Long-term compounders", "Ranked by fundamental quality (growth, profitability, cash flow, balance sheet, stability) and 5-year compounded return."],
+};
+function renderList(){
+  seg("#listseg","list",renderList,Object.keys(LISTS),Object.fromEntries(Object.entries(LISTS).map(([k,v])=>[k,v[0]])));
+  $("#listdesc").textContent = LISTS[state.list][1];
+  const rows = R.rankings[state.list] || [];
+  $("#listt").innerHTML = `<thead><tr><th class="l">#</th><th class="l">Stock</th><th class="l">Company</th><th class="l">Why it's here</th><th>P(up) 1m</th><th>Median 1m</th><th>Confidence</th><th>Risk</th><th>Quality</th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r,i) => { const p = P[r.ticker], pub = p?.horizons[R.primary]?.published;
+      return `<tr class="${pub?"":"dim"}"><td class="l">${i+1}</td><td class="l">${tickCell(r.ticker)}</td><td class="l nm">${esc(r.name)}</td><td class="l why">${esc(r.why)}</td><td>${pbar(r.p_up, p?.horizons[R.primary]?.base_rate)}</td><td class="num ${cls(r.exp_move)}">${pct(r.exp_move)}</td><td>${pill(r.conf)}</td><td class="num">${r.risk}/10</td><td class="num">${r.quality==null?"–":r.quality.toFixed(0)}</td></tr>`; }).join("")
+    : `<tr><td colspan="9" class="l note">No stock clears the confidence threshold for this list today. That's the model declining to guess, by design.</td></tr>`) +
+    (state.list==="opportunities_30d" && (R.rankings.near_threshold||[]).length ? `<tr><td colspan="9" class="l"><h3 style="margin-top:10px">Closest to the threshold (not published)</h3></td></tr>` +
+      R.rankings.near_threshold.map((r,i)=>`<tr class="dim"><td class="l">–</td><td class="l">${tickCell(r.ticker)}</td><td class="l nm">${esc(r.name)}</td><td class="l why">${esc(r.why)}</td><td>${pbar(r.p_up, P[r.ticker]?.horizons[R.primary]?.base_rate)}</td><td class="num ${cls(r.exp_move)}">${pct(r.exp_move)}</td><td>${pill(r.conf)}</td><td class="num">${r.risk}/10</td><td class="num">${r.quality==null?"–":r.quality.toFixed(0)}</td></tr>`).join("") : "") + "</tbody>";
+  wireGo($("#listt"));
 }
 
-// overview
-function pbar(p){ return `<span class="pbar"><span class="num">${(p*100).toFixed(0)}%</span><span class="track"><span class="fill" style="width:${p*100}%"></span><span class="mid"></span></span></span>`; }
-function renderOverview(){
-  const h = state.ov;
-  const rows = R.predictions.map(p => ({t:p.ticker, price:p.price, ...p.horizons[h], risk:p.risk.level, g5:p.horizons[h].p_gain["5"]}));
-  const k = state.sort.k, d = state.sort.dir;
-  rows.sort((a,b) => { const x=a[k], y=b[k]; return (typeof x==="string" ? x.localeCompare(y) : (x-y)) * d; });
-  const cols = [["t","Stock","l"],["price","Price"],["p_up","P(up)"],["exp_move","Median move"],["range","80% range"],["confidence","Confidence"],["lean","Lean","l"],["risk","Risk"],["g5","P(>+5%)"]];
-  $("#ovt").innerHTML = `<thead><tr>${cols.map(c=>`<th class="${c[2]||""}" data-k="${c[0]}" tabindex="0">${c[1]}${state.sort.k===c[0]?(d>0?" ▲":" ▼"):""}</th>`).join("")}</tr></thead><tbody>` +
-    rows.map(r => `<tr class="clickable" data-t="${esc(r.t)}"><td class="tk">${esc(r.t)}</td><td class="num">${r.price.toFixed(2)}</td><td>${pbar(r.p_up)}</td>
-      <td class="num ${cls(r.exp_move)}">${pct(r.exp_move)}</td><td class="num">${pct(r.range[0])} to ${pct(r.range[1])}</td>
-      <td><span class="pill ${r.confidence}">${r.confidence}</span></td><td class="l">${esc(r.lean)}</td><td class="risk-${r.risk.split(" ")[0]}">${esc(r.risk)}</td><td class="num">${pct(r.g5,0,false)}</td></tr>`).join("") + "</tbody>";
-  $("#ovt").querySelectorAll("th").forEach(th => { const go = () => { const k=th.dataset.k; state.sort = {k, dir: state.sort.k===k ? -state.sort.dir : -1}; renderOverview(); }; th.onclick = go; th.onkeydown = e => { if(e.key==="Enter") go(); }; });
-  $("#ovt").querySelectorAll("tr.clickable").forEach(tr => tr.onclick = () => { state.pick = tr.dataset.t; $("#pick").value = state.pick; showTab("detail"); });
+// ---------- screener
+const groups = ["All","Watchlist","S&P 500","Nasdaq-100","Dow 30","Global blue chip"];
+$("#f-group").innerHTML = groups.map(g=>`<option>${g}</option>`).join("");
+["#f-group","#f-sort","#f-pub","#f-q"].forEach(id => $(id).addEventListener("input", renderScreener));
+function renderScreener(){
+  seg("#hz-scr","scr",renderScreener);
+  const h = state.scr, g = $("#f-group").value, q = $("#f-q").value.trim().toLowerCase(), pub = $("#f-pub").checked, key = $("#f-sort").value;
+  let rows = R.predictions.filter(p => (g==="All" || p.groups.includes(g)) && (!pub || p.horizons[h].published) && (!q || p.ticker.toLowerCase().includes(q) || String(p.name).toLowerCase().includes(q)));
+  const cn = {High:3, Medium:2, Low:1};
+  const val = p => { const x=p.horizons[h], f=p.fundamentals||{};
+    return {p_up:x.p_up, risk_adj:x.risk_adj, conf:cn[x.confidence]*10+Math.abs(x.edge), downside:x.band[0], quality:f.quality??0, gs:Math.sqrt(Math.max(f.growth??0,0)*Math.max(f.stability??0,0))}[key]; };
+  rows.sort((a,b) => val(b)-val(a));
+  $("#scr-count").textContent = `${rows.length} stocks · ${rows.filter(p=>p.horizons[h].published).length} with published ${HZNAME[h]} forecasts`;
+  $("#scrt").innerHTML = `<thead><tr><th class="l">Stock</th><th class="l">Company</th><th class="l">Trend</th><th>P(up)</th><th>P(down)</th><th>Exp. change</th><th>80% band</th><th>Confidence</th><th>Similar setups</th><th>Risk</th><th>Size*</th><th>R/R</th><th>Quality</th></tr></thead><tbody>` +
+    rows.map(p => { const x=p.horizons[h], s=x.setup;
+      return `<tr class="${x.published?"":"dim"}"><td class="l">${tickCell(p.ticker)}</td><td class="l nm">${esc(p.name)}</td><td class="l">${esc(p.trend)}</td><td>${pbar(x.p_up,x.base_rate)}</td><td class="num">${(x.p_down*100).toFixed(0)}%</td>
+      <td class="num ${cls(x.exp_move)}">${pct(x.exp_move)}</td><td class="num">${pct(x.band[0])} / ${pct(x.band[1])}</td><td>${pill(x.confidence)}</td>
+      <td class="num">${s?`${(s.hit*100).toFixed(0)}% <span class="note">n=${s.n.toLocaleString()}</span>`:"–"}</td><td class="num">${p.risk_rating}/10</td><td class="num">${h===R.primary?pct(p.position.weight,1,false):"–"}</td><td class="num">${x.rr==null?"–":x.rr.toFixed(2)}</td><td class="num">${p.fundamentals?.quality==null?"–":p.fundamentals.quality.toFixed(0)}</td></tr>`; }).join("") + "</tbody>";
+  wireGo($("#scrt"));
 }
 
-// detail
-$("#pick").innerHTML = R.predictions.map(p => `<option value="${esc(p.ticker)}">${esc(p.ticker)}</option>`).join("");
+// ---------- detail
+$("#pick").innerHTML = [...R.predictions].sort((a,b)=>a.ticker.localeCompare(b.ticker)).map(p => `<option value="${esc(p.ticker)}">${esc(p.ticker)} · ${esc(p.name)}</option>`).join("");
 $("#pick").onchange = e => { state.pick = e.target.value; renderDetail(); };
-function erf(x){ const t=1/(1+0.3275911*Math.abs(x)); const y=1-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*Math.exp(-x*x); return x>=0?y:-y; }
 function renderDetail(){
-  const p = R.predictions.find(x => x.ticker===state.pick) || R.predictions[0];
-  $("#hcards").innerHTML = HZ.map(h => { const x = p.horizons[h];
-    return `<div class="hcard"><h3>${HZNAME[h]}</h3>
-      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:6px"><span class="big num pos">${(x.p_up*100).toFixed(0)}%</span><span class="num neg" style="font-size:18px">${(x.p_down*100).toFixed(0)}% down</span></div>
+  seg("#hz-det","det",renderDetail);
+  const p = P[state.pick] || R.predictions[0]; $("#pick").value = p.ticker;
+  const f = p.fundamentals||{}, rs = p.risk_stats||{};
+  $("#dhead").innerHTML = `<div class="dh"><div><h2>${esc(p.ticker)} · ${esc(p.name)}</h2><div class="sub">${esc(p.sector||"")} ${f.industry?"· "+esc(f.industry):""} · ${p.groups.map(esc).join(", ")}</div></div>
+    <div class="dhk"><div><span class="note">Price</span><b class="num">${p.price.toFixed(2)}</b></div><div><span class="note">Trend</span><b>${esc(p.trend)}</b></div><div><span class="note">Risk rating</span><b class="num">${p.risk_rating}/10</b></div>
+    <div><span class="note">Illustrative size*</span><b class="num">${pct(p.position.weight,1,false)}</b></div><div><span class="note">Momentum</span><b class="num">${p.momentum_score==null?"–":p.momentum_score.toFixed(0)}/100</b></div></div></div>
+    <p class="lead" style="margin:10px 0 0">${esc(p.summary)}</p><p class="note">${esc(p.explanation)} *Size basis: ${esc(p.position.basis)}.</p>`;
+  $("#hcards").innerHTML = HZ.map(h => { const x = p.horizons[h], s = x.setup;
+    return `<div class="hcard ${x.published?"":"dimcard"}"><div class="hh"><h3>${HZNAME[h]}</h3>${pill(x.confidence)}</div>
+      <div class="pud"><span class="big num pos">${(x.p_up*100).toFixed(0)}%</span><span class="num neg">${(x.p_down*100).toFixed(0)}% down</span></div>
       <div class="split"><span class="u" style="width:${x.p_up*100}%"></span><span class="d" style="width:${x.p_down*100}%"></span></div>
-      <dl class="kv"><dt>Median move</dt><dd class="num ${cls(x.exp_move)}">${pct(x.exp_move)}</dd>
-      <dt>80% range</dt><dd class="num">${pct(x.range[0])} to ${pct(x.range[1])}</dd>
-      <dt>Confidence</dt><dd><span class="pill ${x.confidence}">${x.confidence}</span></dd>
-      <dt>P(&gt;+5% / +10% / +20%)</dt><dd class="num">${["5","10","20"].map(k=>pct(x.p_gain[k],0,false)).join(" / ")}</dd>
-      <dt>Model → with live signals</dt><dd class="num">${(x.p_model*100).toFixed(1)}% → ${(x.p_up*100).toFixed(1)}%</dd></dl>
-      ${x.earnings_in_window ? `<div class="note" style="margin-top:6px">Earnings fall inside this window; range widened.</div>`:""}</div>`; }).join("");
-  // price chart
+      <dl class="kv"><dt>Typical up-rate</dt><dd class="num">${(x.base_rate*100).toFixed(0)}%</dd>
+      <dt>Expected change</dt><dd class="num ${cls(x.exp_move)}">${pct(x.exp_move)}</dd>
+      <dt>80% band</dt><dd class="num">${pct(x.band[0])} to ${pct(x.band[1])}</dd>
+      <dt>Risk / reward</dt><dd class="num">${x.rr==null?"–":x.rr.toFixed(2)}</dd>
+      <dt>P(&gt;+5 / +10 / +20%)</dt><dd class="num">${["5","10","20"].map(k=>pct(x.p_gain[k],0,false)).join(" / ")}</dd></dl>
+      <div class="setup">Ranks in the <b>${esc(x.bucket)}</b> of the universe (${(x.rank*100).toFixed(0)}th pct).<br>${s?(x.bucket.startsWith("Middle")?`Past stocks in this bucket (${esc(s.scope.toLowerCase())}) rose ${(s.hit*100).toFixed(0)}% of the time · n=${s.n.toLocaleString()}`:`Similar past calls (${esc(s.scope.toLowerCase())}): <b>${(s.hit*100).toFixed(0)}% right</b> vs ${(s.side_base*100).toFixed(0)}% base rate · n=${s.n.toLocaleString()}`):"No comparable history yet."}</div>
+      ${x.published?"":`<div class="note">Below the confidence threshold. Shown for reference, not published.</div>`}
+      ${x.earnings_in_window?`<div class="note">Earnings inside this window: band widened.</div>`:""}</div>`; }).join("");
   const c = p.chart, up=css("--up"), down=css("--down"), acc=css("--accent"), ink3=css("--ink3");
   const lvl = (v,col,lab) => ({label:lab, data:c.dates.map(()=>v), color:col, dash:"5,4", width:1});
-  lineChart("c-price", {labels:c.dates, xfmt:d=>new Date(d+"T00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"}), xTicks:5, yfmt:v=>(+v).toFixed(2), series:[
-    {label:"Close", data:c.close, color:acc, width:2},
-    {label:"20-day MA", data:c.sma20, color:css("--warn"), width:1.2},
-    {label:"50-day MA", data:c.sma50, color:ink3, width:1.2},
+  lineChart("c-price", {labels:c.dates, xTicks:5, xfmt:d=>new Date(d+"T00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"}), yfmt:v=>(+v).toFixed(2), series:[
+    {label:"Close", data:c.close, color:acc, width:2}, {label:"50-day", data:c.sma50, color:css("--warn"), width:1.2}, {label:"200-day", data:c.sma200, color:ink3, width:1.2},
     ...(c.support||[]).slice(0,1).map(v=>lvl(v,up,"Support")), ...(c.resistance||[]).slice(0,1).map(v=>lvl(v,down,"Resistance"))]});
-  // distribution: split-normal fitted to the 10th/50th/90th percentiles
-  const x = p.horizons[state.det], q10=x.range[0], q50=x.exp_move, q90=x.range[1];
-  const sl = Math.max((q50-q10)/1.2816,1e-4), sr = Math.max((q90-q50)/1.2816,1e-4);
-  const lo = q50-3.2*sl, hi = q50+3.2*sr, N=120, xs=[], ys=[];
-  for (let i=0;i<=N;i++){ const v=lo+(hi-lo)*i/N, s=v<q50?sl:sr; xs.push(v); ys.push(Math.exp(-0.5*((v-q50)/s)**2)*2/(Math.sqrt(2*Math.PI)*(sl+sr))); }
-  lineChart("c-dist", {labels:xs, xfmt:v=>(v*100).toFixed(1)+"%", yfmt:v=>(+v).toFixed(2), hideY:true, ymin:0, legendOn:false, xTicks:7, series:[
-    {label:"Up", data:ys.map((y,i)=>xs[i]>=0?y:null), color:up, fill:true, width:1.5},
-    {label:"Down", data:ys.map((y,i)=>xs[i]<=0?y:null), color:down, fill:true, width:1.5}]});
-  $("#dist-title").textContent = `Probability distribution · ${HZNAME[state.det]}`;
-  $("#dist-note").textContent = `Shape from the model's 10th/50th/90th percentile forecast (${pct(q10)} / ${pct(q50)} / ${pct(q90)}). The shaded split is only a sketch; the headline P(up) comes from the calibrated direction model.`;
-  $("#o-short").textContent = p.short_outlook; $("#o-med").textContent = p.medium_outlook; $("#o-why").textContent = p.explanation;
-  const r = p.risk;
-  $("#risk").innerHTML = `<dl class="kv"><dt>Risk level</dt><dd class="risk-${r.level.split(" ")[0]}"><b>${r.level}</b></dd>
-    <dt>Annualised volatility (3m)</dt><dd class="num">${pct(r.vol_annual,0,false)}</dd><dt>Average daily range (ATR)</dt><dd class="num">${pct(r.atr_pct,1,false)}</dd>
-    <dt>Beta to S&amp;P 500</dt><dd class="num">${isNaN(r.beta)||r.beta==null?"n/a":r.beta.toFixed(2)}</dd><dt>1-week downside (10th pct)</dt><dd class="num neg">${pct(r.downside_q10)}</dd></dl>
-    <ul class="f">${r.notes.map(n=>`<li>${esc(n)}</li>`).join("") || "<li>No special risk flags.</li>"}</ul>`;
+  const x = p.horizons[state.det], mu = x.exp_move, s = (x.band[1]-x.band[0])/(2*1.2816);
+  const xs=[], ys=[]; for (let i=0;i<=120;i++){ const v=mu-3.5*s+7*s*i/120; xs.push(v); ys.push(Math.exp(-0.5*((v-mu)/s)**2)); }
+  lineChart("c-dist", {labels:xs, xfmt:v=>(v*100).toFixed(1)+"%", hideY:true, ymin:0, legendOn:false, xTicks:7, yfmt:v=>(+v).toFixed(2), series:[
+    {label:"Up", data:ys.map((y,i)=>xs[i]>=0?y:null), color:up, fill:true, width:1.5}, {label:"Down", data:ys.map((y,i)=>xs[i]<=0?y:null), color:down, fill:true, width:1.5}]});
+  $("#dist-title").textContent = `Forecast distribution · ${HZNAME[state.det]}`;
+  $("#dist-note").textContent = `Centre ${pct(mu)}; shaded band holds ~80% of outcomes in backtests (${pct(x.band[0])} to ${pct(x.band[1])}).`;
   $("#bull").innerHTML = p.bullish.map(b=>`<li>${esc(b)}</li>`).join("") || "<li>None stand out.</li>";
   $("#bear").innerHTML = p.bearish.map(b=>`<li>${esc(b)}</li>`).join("") || "<li>None stand out.</li>";
-  const fam = [...p.family_contrib].sort((a,b)=>b.value-a.value);
-  hbarChart("c-fam", {labels:fam.map(f=>f.family), values:fam.map(f=>f.value), colors:fam.map(f=>f.value>=0?up:down), xfmt:v=>(v>=0?"+":"")+v.toFixed(2)});
-  $("#drivers").innerHTML = `<thead><tr><th class="l">Feature</th><th>Value</th><th>Push</th></tr></thead><tbody>` + p.top_drivers.map(d=>`<tr><td class="l">${esc(d.feature)}</td><td class="num">${esc(d.value)}</td><td class="num ${cls(d.impact)}">${d.impact>0?"▲":"▼"} ${Math.abs(d.impact).toFixed(3)}</td></tr>`).join("") + "</tbody>";
+  $("#evid").innerHTML = `<thead><tr><th class="l">Component</th><th>Its probability</th><th>Earned weight</th></tr></thead><tbody>` +
+    x.evidence.map(e => `<tr class="${e.weight>0?"":"dim"}"><td class="l">${esc(COMPLABEL[e.component]||e.component)}</td><td class="num">${(e.p*100).toFixed(1)}%</td><td class="num">${e.weight>0?e.weight.toFixed(2):"off"}</td></tr>`).join("") +
+    (Object.keys(x.overlay||{}).length ? `<tr><td class="l">Live overlays (log-odds)</td><td class="num" colspan="2">${Object.entries(x.overlay).map(([k,v])=>`${k.replace("_"," ")} ${v>=0?"+":""}${v.toFixed(2)}`).join(" · ")}</td></tr>` : "") + "</tbody>";
+  $("#drivers").innerHTML = `<thead><tr><th class="l">Feature</th><th>Value</th><th>Push</th></tr></thead><tbody>` + (p.top_drivers||[]).map(d=>`<tr><td class="l">${esc(d.feature)}</td><td class="num">${esc(d.value)}</td><td class="num ${cls(d.impact)}">${d.impact>0?"▲":"▼"} ${Math.abs(d.impact).toFixed(3)}</td></tr>`).join("") + "</tbody>";
+  const qk = [["growth","Growth"],["profitability","Profitability"],["cash_flow","Cash flow"],["balance_sheet","Balance sheet"],["stability","Stability"],["valuation","Valuation"],["quality","Overall quality"]];
+  hbarChart("c-qual", {labels:qk.map(q=>q[1]), values:qk.map(q=>f[q[0]]??50), colors:qk.map(q=>q[0]==="quality"?acc:css("--ink3")), xfmt:v=>v.toFixed(0)});
+  $("#fundkv").innerHTML = [["Market cap",fmtCap(f.marketCap)],["Revenue growth",pct(f.revenueGrowth,0)],["Earnings growth",pct(f.earningsGrowth,0)],["Return on equity",pct(f.returnOnEquity,0,false)],
+    ["Operating margin",pct(f.operatingMargins,0,false)],["FCF margin",pct(f.fcf_margin,0,false)],["Debt / equity",f.debtToEquity==null?"n/a":(f.debtToEquity/100).toFixed(2)+"x"],["Forward P/E",f.forwardPE==null?"n/a":f.forwardPE.toFixed(1)],
+    ["1-yr volatility",pct(rs.vol_1y,0,false)],["Max drawdown (3y)",pct(rs.max_dd_3y,0)],["5-yr CAGR",pct(rs.cagr_5y,1)],["Beta",rs.beta==null?"n/a":rs.beta.toFixed(2)]].map(([k,v])=>`<dt>${k}</dt><dd class="num">${v}</dd>`).join("");
   const L = p.live;
-  if (!L){ $("#live").innerHTML = `<p class="note">Live signals were not collected in this run.</p>`; return; }
-  const n=L.news||{}, a=L.analyst||{}, o=L.options||{}, ins=L.institutional||{};
-  const sc = v => `<span class="num ${cls(v)}">${v>=0?"+":""}${(v||0).toFixed(2)}</span>`;
-  $("#live").innerHTML = `
-    <div><h3>News sentiment ${sc(n.score)}</h3><ul class="f">${(n.headlines||[]).map(hd=>`<li>${hd.url?`<a href="${esc(hd.url)}" target="_blank" rel="noopener">${esc(hd.title)}</a>`:esc(hd.title)} <span class="note">${esc(hd.source||"")} · ${sc(hd.score)}</span></li>`).join("")||"<li>No recent headlines.</li>"}</ul></div>
-    <div class="stack" style="gap:10px">
-      <div><h3>Analysts ${sc(a.score)}</h3><dl class="kv"><dt>Consensus</dt><dd>${esc(a.rating||"n/a")}</dd><dt>Target vs price</dt><dd class="num">${pct(a.target_upside,0)}</dd><dt>Net up/downgrades (30d)</dt><dd class="num">${a.net_upgrades_30d??"n/a"}</dd></dl></div>
-      <div><h3>Options ${sc(o.score)}</h3><dl class="kv"><dt>Put/call volume</dt><dd class="num">${o.put_call_vol?.toFixed(2)??"n/a"}</dd><dt>Put/call open interest</dt><dd class="num">${o.put_call_oi?.toFixed(2)??"n/a"}</dd><dt>ATM implied vol</dt><dd class="num">${pct(o.iv_atm,0,false)}</dd><dt>Implied ÷ realised vol</dt><dd class="num">${o.iv_vs_rv?.toFixed(2)??"n/a"}</dd><dt>Unusual activity</dt><dd>${o.unusual?"Yes":"No"}</dd></dl></div>
-      <div><h3>Institutions &amp; insiders ${sc(ins.score)}</h3><dl class="kv"><dt>Held by institutions</dt><dd class="num">${pct(ins.inst_pct,0,false)}</dd><dt>Net insider $ (6m)</dt><dd class="num ${cls(ins.insider_net_6m)}">${ins.insider_net_6m==null?"n/a":(ins.insider_net_6m/1e6).toFixed(1)+"M"}</dd></dl></div>
-    </div>`;
+  if (!L){ $("#live").innerHTML = `<p class="note">Not collected for this stock in this run (live signals are fetched for the watchlist and the strongest model calls).</p>`; return; }
+  const sc = v => `<span class="num ${cls(v)}">${v>=0?"+":""}${(v||0).toFixed(2)}</span>`; const n=L.news||{}, a=L.analyst||{}, o=L.options||{}, ins=L.institutional||{};
+  $("#live").innerHTML = `<h3 style="margin-top:6px">News ${sc(n.score)}</h3><ul class="f">${(n.headlines||[]).map(hd=>`<li>${hd.url?`<a href="${esc(hd.url)}" target="_blank" rel="noopener">${esc(hd.title)}</a>`:esc(hd.title)} <span class="note">${esc(hd.source||"")} ${sc(hd.score)}</span></li>`).join("")||"<li>No recent headlines.</li>"}</ul>
+    <dl class="kv" style="margin-top:8px"><dt>Analyst consensus ${sc(a.score)}</dt><dd>${esc(a.rating||"n/a")}</dd><dt>Target vs price</dt><dd class="num">${pct(a.target_upside,0)}</dd><dt>Net up/downgrades (30d)</dt><dd class="num">${a.net_upgrades_30d??"n/a"}</dd>
+    <dt>Options ${sc(o.score)}: put/call vol</dt><dd class="num">${o.put_call_vol?.toFixed(2)??"n/a"}</dd><dt>Implied ÷ realised vol</dt><dd class="num">${o.iv_vs_rv?.toFixed(2)??"n/a"}</dd><dt>Unusual options activity</dt><dd>${o.unusual?"Yes":"No"}</dd>
+    <dt>Institutions ${sc(ins.score)}: held</dt><dd class="num">${pct(ins.inst_pct,0,false)}</dd><dt>Net insider $ (6m)</dt><dd class="num ${cls(ins.insider_net_6m)}">${ins.insider_net_6m==null?"n/a":(ins.insider_net_6m/1e6).toFixed(1)+"M"}</dd></dl>`;
 }
 
-// scanner
-function renderScanner(){
-  const h = state.scan, rk = R.rankings[h];
-  $("#gainlists").innerHTML = R.thresholds.map(t => `<div class="panel"><h3>Chance of +${t}% within ${HZNAME[h]}</h3><ol class="rank">${rk[String(t)].slice(0,8).map(r=>`<li><span class="tk">${esc(r.ticker)}</span><span class="num">${pct(r.p_gain,0,false)} <span class="note">· median ${pct(r.exp_move)}</span></span></li>`).join("")}</ol></div>`).join("");
-  $("#rat").innerHTML = `<thead><tr><th class="l">#</th><th class="l">Stock</th><th>Risk-adj. score</th><th>Median move</th><th>80% range</th><th>P(up)</th></tr></thead><tbody>` +
-    rk.risk_adjusted.map((r,i)=>`<tr><td class="l">${i+1}</td><td class="tk l">${esc(r.ticker)}</td><td class="num ${cls(r.risk_adj)}">${r.risk_adj.toFixed(2)}</td><td class="num ${cls(r.exp_move)}">${pct(r.exp_move)}</td><td class="num">${pct(r.range[0])} to ${pct(r.range[1])}</td><td>${pbar(r.p_up)}</td></tr>`).join("") + "</tbody>";
-}
-
-// backtest
+// ---------- backtest
 function renderBacktest(){
-  const B = R.backtest || {};
-  if (!Object.keys(B).length){ $("#bt-summary").textContent = "The backtest was skipped in this run."; return; }
-  const f = v => v==null||isNaN(v) ? "n/a" : v.toFixed(3);
-  $("#btt").innerHTML = `<thead><tr><th class="l">Horizon</th><th>Test period</th><th>Predictions</th><th>Accuracy</th><th>Naive</th><th>AUC</th><th>Brier skill</th><th>Accuracy when ≥60/≤40%</th><th>Share of calls</th><th>80% range held</th></tr></thead><tbody>` +
-    HZ.filter(h=>B[h]).map(h=>{ const m=B[h]; return `<tr><td class="l">${HZNAME[h]}</td><td class="num">${m.start} → ${m.end}</td><td class="num">${m.n.toLocaleString()}</td><td class="num">${pct(m.accuracy,1,false)}</td><td class="num">${pct(m.naive_accuracy,1,false)}</td><td class="num ${m.auc>0.52?"pos":m.auc<0.5?"neg":""}">${f(m.auc)}</td><td class="num ${cls(m.brier_skill)}">${pct(m.brier_skill,1)}</td><td class="num">${pct(m.high_conf_accuracy,1,false)}</td><td class="num">${pct(m.high_conf_share,0,false)}</td><td class="num">${pct(m.range_coverage_80,0,false)}</td></tr>`; }).join("") + "</tbody>";
-  const best = HZ.filter(h=>B[h]).sort((a,b)=>B[b].auc-B[a].auc)[0];
-  const edge = B[best].auc - 0.5;
-  $("#bt-summary").textContent = edge < 0.02
-    ? `Out of sample the model shows essentially no directional edge (best AUC ${B[best].auc.toFixed(3)} at ${HZNAME[best]}; 0.5 is a coin flip). Its probabilities are therefore held close to the base rate. Treat it as a structured summary of signals, not a forecast.`
-    : `Best out-of-sample edge is at ${HZNAME[best]} (AUC ${B[best].auc.toFixed(3)}, accuracy ${pct(B[best].accuracy,1,false)} vs ${pct(B[best].naive_accuracy,1,false)} naive). Modest edges like this are typical and can fade; probabilities are shrunk toward the base rate to match the evidence.`;
+  const B = R.backtest, f3 = v => v==null||isNaN(v) ? "–" : v.toFixed(3);
+  $("#btt").innerHTML = `<thead><tr><th class="l">Horizon</th><th>Test period</th><th>Predictions</th><th>Accuracy</th><th>Naive</th><th>Precision</th><th>Recall</th><th>AUC</th><th>Ranking AUC</th><th>Brier skill</th><th>Published</th><th>Published accuracy</th><th>80% band held</th></tr></thead><tbody>` +
+    HZ.filter(h=>B[h]).map(h=>{ const m=B[h].metrics; return `<tr><td class="l">${HZNAME[h]}</td><td class="num">${m.start} → ${m.end}</td><td class="num">${m.n.toLocaleString()}</td><td class="num">${pct(m.accuracy,1,false)}</td><td class="num">${pct(m.naive_accuracy,1,false)}</td><td class="num">${pct(m.precision,1,false)}</td><td class="num">${pct(m.recall,1,false)}</td><td class="num">${f3(m.auc)}</td><td class="num ${m.ranking_auc>0.51?"pos":m.ranking_auc<0.5?"neg":""}">${f3(m.ranking_auc)}</td><td class="num ${cls(m.brier_skill)}">${pct(m.brier_skill,1)}</td><td class="num">${pct(m.published_share,0,false)}</td><td class="num">${pct(m.published_accuracy,1,false)}</td><td class="num">${pct(m.band_coverage,0,false)}</td></tr>`; }).join("") + "</tbody>";
+  const best = HZ.filter(h=>B[h]).sort((a,b)=>(B[b].metrics.ranking_auc||0)-(B[a].metrics.ranking_auc||0))[0];
+  const bm = B[best].metrics;
+  $("#bt-lead").textContent = bm.ranking_auc < 0.51
+    ? `No horizon shows a meaningful out-of-sample edge (best ranking AUC ${f3(bm.ranking_auc)} at ${HZNAME[best]}). The model therefore publishes few or no forecasts and keeps probabilities near the base rate.`
+    : `Strongest evidence is at ${HZNAME[best]}: ranking AUC ${f3(bm.ranking_auc)}; published calls were right ${pct(bm.published_accuracy,1,false)} of the time vs ${pct(bm.naive_accuracy,1,false)} naive, on ${pct(bm.published_share,0,false)} of opportunities. Small edges like this are normal and can fade.`;
   seg("#hz-bt","bt",renderBacktest);
-  const m = B[state.bt] || B[best]; const up=css("--up"), down=css("--down"), acc=css("--accent"), ink3=css("--ink3");
-  calChart("c-cal", m.calibration);
-  vbarChart("c-quint", {labels:m.quintile_returns.map(q=>"Q"+q.q), values:m.quintile_returns.map(q=>q.avg_ret*100), colors:m.quintile_returns.map(q=>q.avg_ret>=0?up:down), yfmt:v=>v.toFixed(2)+"%"});
-  lineChart("c-eq", {labels:m.equity_curve.map(e=>e.date), xTicks:4, xfmt:d=>new Date(d+"T00:00").toLocaleDateString(undefined,{month:"short",year:"2-digit"}), yfmt:v=>(+v).toFixed(2)+"×", series:[
-    {label:"P(up) > 55%", data:m.equity_curve.map(e=>e.model), color:acc, width:2},
-    {label:"Equal-weight all", data:m.equity_curve.map(e=>e.equal_weight), color:ink3, width:1.5}]});
-  const I = R.importance[state.bt] || R.importance["1w"];
-  const pal = [acc, css("--up"), css("--warn"), css("--down"), ink3, "#5b8fa8", "#8a6fb0", "#9c8b5e"];
-  hbarChart("c-impfam", {labels:I.families.map(f=>f.family), values:I.families.map(f=>f.share*100), colors:I.families.map((_,i)=>pal[i%pal.length]), xfmt:v=>v.toFixed(0)+"%"});
-  hbarChart("c-imp", {labels:I.features.map(f=>f.label), values:I.features.map(f=>f.importance), colors:[acc], xfmt:v=>v.toFixed(4)});
+  const b = B[state.bt] || B[best]; const acc=css("--accent"), ink3=css("--ink3"), up=css("--up"), down=css("--down");
+  $("#segt").innerHTML = `<thead><tr><th class="l">Condition</th><th>Predictions</th><th>Up-rate</th><th>Accuracy</th><th>Naive</th><th>Precision</th><th>Recall</th><th>AUC</th><th>Ranking AUC</th><th>Published</th><th>Published accuracy</th></tr></thead><tbody>` +
+    b.segments.map(s=>`<tr><td class="l">${esc(s.segment)}</td><td class="num">${s.n.toLocaleString()}</td><td class="num">${pct(s.base_rate,0,false)}</td><td class="num">${pct(s.accuracy,1,false)}</td><td class="num">${pct(s.naive_accuracy,1,false)}</td><td class="num">${pct(s.precision,1,false)}</td><td class="num">${pct(s.recall,1,false)}</td><td class="num">${f3(s.auc)}</td><td class="num">${f3(s.ranking_auc)}</td><td class="num">${pct(s.published_share,0,false)}</td><td class="num">${pct(s.published_accuracy,1,false)}</td></tr>`).join("") + "</tbody>";
+  const S = b.strategy;
+  lineChart("c-eq", {labels:S.curve.map(e=>e.date), xTicks:4, xfmt:d=>new Date(d+"T00:00").toLocaleDateString(undefined,{month:"short",year:"2-digit"}), yfmt:v=>(+v).toFixed(2)+"×", series:[
+    {label:"Published bullish calls", data:S.curve.map(e=>e.strategy), color:acc, width:2}, {label:"Equal-weight universe", data:S.curve.map(e=>e.benchmark), color:ink3, width:1.5}]});
+  lineChart("c-dd", {labels:S.curve.map(e=>e.date), xTicks:4, xfmt:d=>new Date(d+"T00:00").toLocaleDateString(undefined,{month:"short",year:"2-digit"}), yfmt:v=>(v*100).toFixed(0)+"%", ymax:0, legendOn:false, series:[{label:"Drawdown", data:S.curve.map(e=>e.dd), color:down, fill:true, width:1.2}]});
+  const row = (n,o) => `<tr><td class="l">${n}</td><td class="num ${cls(o.ann_return)}">${pct(o.ann_return,1)}</td><td class="num">${pct(o.ann_vol,1,false)}</td><td class="num">${o.sharpe.toFixed(2)}</td><td class="num neg">${pct(o.max_drawdown,1)}</td><td class="num">${pct(o.win_rate,0,false)}</td></tr>`;
+  $("#stratt").innerHTML = `<thead><tr><th class="l">Portfolio</th><th>Ann. return</th><th>Volatility</th><th>Sharpe</th><th>Max drawdown</th><th>Win rate</th></tr></thead><tbody>${row("Published bullish calls",S.strategy)}${row("Equal-weight universe",S.benchmark)}${row("Top-minus-bottom quintile",S.long_short)}</tbody>` +
+    `<caption class="note" style="caption-side:bottom;text-align:left;padding-top:6px">Invested ${pct(S.invested_share,0,false)} of periods · avg ${S.avg_positions.toFixed(1)} positions · position hit rate ${pct(S.position_hit_rate,0,false)}</caption>`;
+  $("#compt").innerHTML = `<thead><tr><th class="l">Component</th><th>Weight now</th><th>Recent AUC</th><th>Full-history AUC</th><th class="l">Status</th></tr></thead><tbody>` +
+    b.components.map(c=>`<tr class="${c.weight>0?"":"dim"}"><td class="l">${esc(c.label)}</td><td class="num">${c.weight.toFixed(2)}</td><td class="num">${f3(c.recent_auc)}</td><td class="num">${f3(c.full_auc)}</td><td class="l"><span class="pill ${c.status==="Active"?"High":c.status==="Reduced"?"Medium":"Low"}">${esc(c.status)}</span></td></tr>`).join("") + "</tbody>";
+  const wh = b.weights_history||[], keys = b.components.map(c=>c.key), pal=[acc,up,css("--warn"),down,ink3,"#7a68b3"];
+  if (wh.length) lineChart("c-wh", {labels:wh.map(w=>w.start), xTicks:4, yfmt:v=>(+v).toFixed(2), ymin:0, series:keys.map((k,i)=>({label:COMPLABEL[k]||k, data:wh.map(w=>+w[k]||0), color:pal[i%pal.length], width:1.6}))});
+  calChart("c-cal", b.calibration);
+  $("#gaint").innerHTML = `<thead><tr><th class="l">Threshold</th><th>Formula (avg)</th><th>Actual</th><th>Correction applied</th></tr></thead><tbody>` + b.gain_calibration.map(g=>`<tr><td class="l">+${g.threshold}%</td><td class="num">${pct(g.predicted,1,false)}</td><td class="num">${pct(g.actual,1,false)}</td><td class="num">×${(g.scale??1).toFixed(2)}</td></tr>`).join("") + "</tbody>";
 }
 
-seg("#hz-overview","ov",renderOverview); seg("#hz-detail","det",renderDetail); seg("#hz-scanner","scan",renderScanner);
-renderOverview();
+// ---------- model
+function renderModel(){
+  const I = R.importance||{}; const acc=css("--accent"), pal=[acc,css("--up"),css("--warn"),css("--down"),css("--ink3"),"#5b8fa8","#8a6fb0","#9c8b5e","#6f9a6a","#b07a5a","#5a7ab0","#a0a05a","#7aa0a0","#a07aa0"];
+  if (I.families){ hbarChart("c-impfam", {labels:I.families.map(f=>f.family), values:I.families.map(f=>f.share*100), colors:I.families.map((_,i)=>pal[i%pal.length]), xfmt:v=>v.toFixed(0)+"%"});
+    hbarChart("c-imp", {labels:I.features.map(f=>f.label||f.feature), values:I.features.map(f=>f.importance), colors:[acc], xfmt:v=>v.toFixed(4)}); }
+  const C = R.rules.confidence, Ps = R.rules.position;
+  $("#rules").innerHTML = `<ul class="f">
+    <li><b>High</b>: the stock ranks in the top (or bottom) 10% of the universe, its probability is ≥ ${(C.high.min_edge*100).toFixed(0)} pts above (below) the typical up-rate, and past calls from the same bucket beat their base rate by ≥ ${(C.high.setup_edge*100).toFixed(1)} pts on ≥ ${C.high.min_n} cases.</li>
+    <li><b>Medium</b>: top/bottom 25%, ≥ ${(C.medium.min_edge*100).toFixed(0)} pt edge, and the bucket beat its base rate by ≥ ${(C.medium.setup_edge*100).toFixed(1)} pts on ≥ ${C.medium.min_n} cases.</li>
+    <li><b>Low</b>: anything else. Not published; shown greyed for reference. High is capped at Medium when earnings fall inside the window.</li>
+    <li><b>Uncertainty band</b>: sized so ${(R.rules.band*100).toFixed(0)}% of backtest outcomes landed inside it.</li>
+    <li><b>Illustrative size</b>: ${(Ps.risk_per_idea*100).toFixed(1)}% portfolio risk ÷ the band's 1-month downside, × ${Ps.conf_mult.High} (High) or ${Ps.conf_mult.Medium} (Medium), capped at ${(Ps.max_weight*100).toFixed(0)}%. Zero without a published bullish forecast. A sizing rule, not advice.</li>
+    <li><b>Risk rating 1–10</b>: universe percentile of volatility, drawdown, downside beta, forecast downside and leverage.</li></ul>`;
+  $("#method").innerHTML = `
+    <li><b>Universe:</b> S&amp;P 500, Nasdaq-100, Dow 30 and global blue chips, screened for market cap ≥ $30B, profitability, positive free cash flow and moderate debt, then ranked by quality. Your watchlist is always included.</li>
+    <li><b>Evidence:</b> ${R.n_features} point-in-time features: price and volume, RSI/MACD/Bollinger/ATR/ADX/moving averages, chart patterns and support/resistance, momentum, sector and relative strength, sector rotation, market regime (bull/bear/sideways, volatility), breadth, rates, inflation, unemployment/recession signals, GDP, and earnings surprises.</li>
+    <li><b>Ensemble:</b> five stock-selection components (technical, relative strength, earnings, time-series, linear all-factor) predict whether a stock beats the average stock; one market-timing component predicts market direction. Each earns a weight from its out-of-sample record (the worse of recent and full-history AUC), and components below the bar are switched off automatically.</li>
+    <li><b>Calibration:</b> the blend is isotonic-calibrated on earlier out-of-sample results; expected change and bands come from an EWMA volatility forecast calibrated to hold 80% of outcomes; big-move odds use a drift-diffusion formula checked against actual hit rates.</li>
+    <li><b>Backtest:</b> walk-forward across the whole history (bull, bear, high-volatility, earnings-season and downturn periods), with accuracy, precision, recall, AUC, ranking AUC, Brier skill, and a signal portfolio's Sharpe, drawdown and win rate.</li>
+    <li><b>Fundamentals</b> (quality, growth, balance sheet) come from today's snapshot and drive the universe screen and the quality lists. They are not in the backtested model, to avoid look-ahead bias.</li>
+    <li><b>Live overlays</b> (news, analysts, options, insiders) can't be backtested with free data; they nudge probabilities by a small capped amount.</li>
+    <li><b>Limits:</b> short-term returns are mostly noise; expect small edges, no costs or taxes modelled, and past performance may not repeat.</li>`;
+}
+
+renderList();
 const start = (location.hash||"").slice(1);
-if (["detail","scanner","backtest"].includes(start)) showTab(start);
+if (["screener","detail","backtest","model"].includes(start)) showTab(start);
 const rerender = () => { const t=document.querySelector('.tabs [aria-selected="true"]').dataset.tab; showTab(t); };
 matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", rerender);
 let rz; addEventListener("resize", () => { clearTimeout(rz); rz=setTimeout(rerender, 200); });
+
 </script>
 </body>
 </html>

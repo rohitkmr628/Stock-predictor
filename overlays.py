@@ -15,11 +15,10 @@ import config
 
 # How much each overlay matters at each horizon (news fades fast, analyst/institutional build slowly).
 HORIZON_SCALE = {
-    "news_sentiment": {"1d": 1.0, "1w": 0.7, "1m": 0.4},
-    "analyst": {"1d": 0.3, "1w": 0.6, "1m": 1.0},
-    "options": {"1d": 1.0, "1w": 0.8, "1m": 0.5},
-    "institutional": {"1d": 0.2, "1w": 0.5, "1m": 1.0},
-    "earnings_event": {"1d": 1.0, "1w": 1.0, "1m": 1.0},
+    "news_sentiment": {"1d": 1.0, "1w": 0.7, "1m": 0.4, "3m": 0.2},
+    "analyst": {"1d": 0.3, "1w": 0.6, "1m": 1.0, "3m": 1.0},
+    "options": {"1d": 1.0, "1w": 0.8, "1m": 0.5, "3m": 0.3},
+    "institutional": {"1d": 0.2, "1w": 0.5, "1m": 1.0, "3m": 1.0},
 }
 SOURCE_KEY = {"news_sentiment": "news", "analyst": "analyst", "options": "options", "institutional": "institutional"}
 
@@ -158,13 +157,19 @@ def institutional_signal(tk) -> dict:
 
 def collect_live(tickers: list[str], last_close: dict[str, float], realized_vol: dict[str, float]) -> dict:
     import yfinance as yf
-    live = {}
-    for t in tickers:
-        tk = yf.Ticker(t)
-        px = last_close.get(t)
-        live[t] = {"news": news_signal(tk), "analyst": analyst_signal(tk, px),
-                   "options": options_signal(tk, px, realized_vol.get(t)), "institutional": institutional_signal(tk)}
-        print(f"  live signals: {t}")
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(t):
+        try:
+            tk = yf.Ticker(t); px = last_close.get(t)
+            return t, {"news": news_signal(tk), "analyst": analyst_signal(tk, px),
+                       "options": options_signal(tk, px, realized_vol.get(t)), "institutional": institutional_signal(tk)}
+        except Exception:
+            return t, None
+
+    with ThreadPoolExecutor(6) as ex:
+        live = {t: v for t, v in ex.map(one, tickers) if v}
+    print(f"  live signals: {len(live)}/{len(tickers)} tickers")
     return live
 
 

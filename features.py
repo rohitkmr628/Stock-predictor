@@ -2,6 +2,8 @@
 Every feature at date t uses only information available at the close of t (no look-ahead)."""
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -9,6 +11,7 @@ import config
 
 # Feature families, used to group importance and explanations.
 FAMILY_PREFIX = {
+    "xs_": "Cross-sectional rank",
     "tech_": "Technical indicators",
     "pat_": "Chart patterns",
     "rel_": "Sector & relative strength",
@@ -17,6 +20,10 @@ FAMILY_PREFIX = {
     "macro_": "Macroeconomic",
     "earn_": "Earnings calendar",
     "ts_": "Time-series forecast",
+    "regime_": "Market regime",
+    "breadth_": "Market breadth & sentiment",
+    "sect_": "Sector rotation",
+    "fund_": "Earnings results",
 }
 
 
@@ -237,8 +244,8 @@ def support_resistance_levels(df: pd.DataFrame, k: int = 5, lookback: int = 250)
     return {"resistance": [float(x) for x in res], "support": [float(x) for x in sup]}
 
 
-# --------------------------------------------------------------------------- market / macro
-def market_features(prices: dict[str, pd.DataFrame], macro: pd.DataFrame) -> pd.DataFrame:
+# --------------------------------------------------------------------------- market / macro / regime
+def market_features(prices: dict[str, pd.DataFrame], macro: pd.DataFrame, universe: list[str]) -> pd.DataFrame:
     spy = prices[config.MARKET["spx"]]["close"]
     f = pd.DataFrame(index=spy.index)
     for key, sym in config.MARKET.items():
@@ -247,33 +254,69 @@ def market_features(prices: dict[str, pd.DataFrame], macro: pd.DataFrame) -> pd.
             f[f"mkt_{key}_ret5"] = c.pct_change(5, fill_method=None)
             f[f"mkt_{key}_ret21"] = c.pct_change(21, fill_method=None)
             f[f"mkt_{key}_dist200"] = c / c.rolling(200).mean() - 1
-    f["mkt_breadth_proxy"] = (f.get("mkt_rut_ret21", 0) - f.get("mkt_spx_ret21", 0))
-    f["mkt_spx_vol21"] = np.log(spy).diff().rolling(21).std() * np.sqrt(252)
+    f["mkt_small_vs_large21"] = f.get("mkt_rut_ret21", 0) - f.get("mkt_spx_ret21", 0)
+    f["mkt_growth_vs_blend21"] = f.get("mkt_ndx_ret21", 0) - f.get("mkt_spx_ret21", 0)
+    lr = np.log(spy).diff()
+    f["mkt_spx_vol21"] = lr.rolling(21).std() * np.sqrt(252)
     for key, sym in config.MACRO_MARKET.items():
         if sym not in prices:
             continue
         c = prices[sym]["close"].reindex(f.index).ffill()
         if key in ("vix", "tnx", "irx"):
-            f[f"x_{key}"] = c
-            f[f"x_{key}_chg5"] = c.diff(5)
-            f[f"x_{key}_chg21"] = c.diff(21)
+            f[f"x_{key}"] = c; f[f"x_{key}_chg5"] = c.diff(5); f[f"x_{key}_chg21"] = c.diff(21)
         else:
-            f[f"x_{key}_ret5"] = c.pct_change(5, fill_method=None)
-            f[f"x_{key}_ret21"] = c.pct_change(21, fill_method=None)
+            f[f"x_{key}_ret5"] = c.pct_change(5, fill_method=None); f[f"x_{key}_ret21"] = c.pct_change(21, fill_method=None)
     if "x_tnx" in f and "x_irx" in f:
         f["x_curve_10y_3m"] = f["x_tnx"] - f["x_irx"]
     if "x_vix" in f:
         f["x_vix_z"] = (f["x_vix"] - f["x_vix"].rolling(252).mean()) / f["x_vix"].rolling(252).std()
+        f["breadth_vix_term"] = f["x_vix"] / f["x_vix"].rolling(63).mean()
+    # ---- market regime (rule-based, point-in-time)
+    dd = spy / spy.rolling(252, min_periods=60).max() - 1
+    r126 = spy.pct_change(126, fill_method=None)
+    above200 = spy > spy.rolling(200).mean()
+    volpct = f["mkt_spx_vol21"].rolling(756, min_periods=252).rank(pct=True)
+    f["regime_bull"] = (above200 & (r126 > 0)).astype(float)
+    f["regime_bear"] = ((~above200) & ((r126 < -0.05) | (dd < -0.15))).astype(float)
+    f["regime_spx_dd"] = dd
+    f["regime_vol_pct"] = volpct
+    f["regime_highvol"] = ((volpct > 0.8) | (f.get("x_vix", pd.Series(0, index=f.index)) > 25)).astype(float)
+    # ---- breadth across the universe (share of stocks in uptrends)
+    closes = pd.DataFrame({t: prices[t]["close"] for t in universe if t in prices}).reindex(f.index)
+    if closes.shape[1] >= 5:
+        f["breadth_above50"] = (closes > closes.rolling(50).mean()).sum(axis=1) / closes.notna().sum(axis=1)
+        f["breadth_above200"] = (closes > closes.rolling(200).mean()).sum(axis=1) / closes.notna().sum(axis=1)
+        f["breadth_up21"] = (closes.pct_change(21, fill_method=None) > 0).sum(axis=1) / closes.notna().sum(axis=1)
+        f["breadth_new_high_share"] = (closes >= closes.rolling(252, min_periods=120).max()).sum(axis=1) / closes.notna().sum(axis=1)
+    # ---- sector rotation: each SPDR sector's 3-month return vs S&P, ranked
+    sect = {}
+    for name, etf in config.SECTOR_ETF.items():
+        if etf in prices:
+            sect[etf] = prices[etf]["close"].reindex(f.index).ffill().pct_change(63, fill_method=None) - spy.pct_change(63, fill_method=None)
+    sect_df = pd.DataFrame(sect)
+    defensive = [e for e in ("XLP", "XLU", "XLV") if e in sect_df]
+    cyclical = [e for e in ("XLK", "XLY", "XLI", "XLF") if e in sect_df]
+    if defensive and cyclical:
+        f["sect_risk_on"] = sect_df[cyclical].mean(axis=1) - sect_df[defensive].mean(axis=1)
     if not macro.empty:
         f = f.join(macro.reindex(f.index, method="ffill"))
-    return f
+    labels = pd.DataFrame(index=f.index)
+    labels["regime"] = np.where(f["regime_bull"] == 1, "Bull", np.where(f["regime_bear"] == 1, "Bear", "Sideways"))
+    labels["vol_regime"] = np.where(f["regime_highvol"] == 1, "High volatility", "Normal volatility")
+    downturn = (dd < -0.2)
+    if "macro_sahm" in f:
+        downturn |= f["macro_sahm"] >= 0.5
+    if "macro_gdp_yoy" in f:
+        downturn |= f["macro_gdp_yoy"] < 0
+    labels["downturn"] = downturn.fillna(False)
+    return f, sect_df.rank(axis=1, pct=True), labels
 
 
 def relative_features(stock: pd.DataFrame, sector: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
     c = stock["close"]
     s = sector["close"].reindex(c.index).ffill(); m = market["close"].reindex(c.index).ffill()
     f = pd.DataFrame(index=c.index)
-    for n in (5, 21, 63):
+    for n in (5, 21, 63, 126):
         f[f"rel_vs_sector_{n}d"] = c.pct_change(n, fill_method=None) - s.pct_change(n, fill_method=None)
         f[f"rel_vs_mkt_{n}d"] = c.pct_change(n, fill_method=None) - m.pct_change(n, fill_method=None)
     f["rel_sector_ret5"] = s.pct_change(5, fill_method=None)
@@ -282,25 +325,48 @@ def relative_features(stock: pd.DataFrame, sector: pd.DataFrame, market: pd.Data
     rs, rm = np.log(c).diff(), np.log(m).diff()
     f["rel_beta63"] = rs.rolling(63).cov(rm) / rm.rolling(63).var()
     f["rel_corr63"] = rs.rolling(63).corr(rm)
+    f["rel_downside_beta"] = rs.where(rm < 0).rolling(126, min_periods=40).cov(rm.where(rm < 0)) / rm.where(rm < 0).rolling(126, min_periods=40).var()
     return f
 
 
-def earnings_features(index: pd.DatetimeIndex, dates: list[pd.Timestamp]) -> pd.DataFrame:
+def earnings_features(index: pd.DatetimeIndex, events: list[dict]) -> tuple[pd.DataFrame, pd.Series]:
+    """Days to/since earnings and the last reported EPS surprises (only after the report date)."""
     f = pd.DataFrame(index=index)
-    if not dates:
-        f["earn_days_since"] = np.nan; f["earn_days_to"] = np.nan; f["earn_in_5d"] = np.nan; f["earn_in_21d"] = np.nan
-        return f
-    d = np.array(sorted(dates), dtype="datetime64[ns]")
-    ix = index.to_numpy()
+    cols = ["earn_days_since", "earn_days_to", "earn_in_5d", "earn_in_21d", "fund_last_surprise", "fund_surprise_avg4", "fund_beat_streak"]
+    if not events:
+        for c in cols:
+            f[c] = np.nan
+        return f, pd.Series(False, index=index)
+    ev = pd.DataFrame(events)
+    ev["date"] = pd.to_datetime(ev["date"]); ev = ev.sort_values("date").drop_duplicates("date")
+    d = ev["date"].to_numpy(dtype="datetime64[ns]"); ix = index.to_numpy()
     pos = np.searchsorted(d, ix, side="right")
     prev = np.where(pos > 0, d[np.clip(pos - 1, 0, len(d) - 1)], np.datetime64("NaT"))
     nxt = np.where(pos < len(d), d[np.clip(pos, 0, len(d) - 1)], np.datetime64("NaT"))
-    since = (ix - prev).astype("timedelta64[D]").astype(float)
-    to = (nxt - ix).astype("timedelta64[D]").astype(float)
-    f["earn_days_since"] = np.clip(since, 0, 120)
-    f["earn_days_to"] = np.clip(to, 0, 120)
-    f["earn_in_5d"] = (to <= 7).astype(float)
-    f["earn_in_21d"] = (to <= 30).astype(float)
+    since = (ix - prev).astype("timedelta64[D]").astype(float); to = (nxt - ix).astype("timedelta64[D]").astype(float)
+    f["earn_days_since"] = np.clip(since, 0, 120); f["earn_days_to"] = np.clip(to, 0, 120)
+    f["earn_in_5d"] = (to <= 7).astype(float); f["earn_in_21d"] = (to <= 30).astype(float)
+    rep = ev.dropna(subset=["surprise"]).set_index("date")["surprise"].clip(-100, 100)
+    if len(rep):
+        s = rep.reindex(index.union(rep.index)).ffill().reindex(index)
+        f["fund_last_surprise"] = s
+        f["fund_surprise_avg4"] = rep.rolling(4, min_periods=1).mean().reindex(index.union(rep.index)).ffill().reindex(index)
+        streak = (rep > 0).astype(int); streak = streak.groupby((streak != streak.shift()).cumsum()).cumsum() * np.where(rep > 0, 1, -1)
+        f["fund_beat_streak"] = pd.Series(streak.values, rep.index).reindex(index.union(rep.index)).ffill().reindex(index)
+        f.loc[f["earn_days_since"] > 100, ["fund_last_surprise"]] = np.nan   # stale
+    else:
+        f["fund_last_surprise"] = np.nan; f["fund_surprise_avg4"] = np.nan; f["fund_beat_streak"] = np.nan
+    season = pd.Series(since <= 10, index=index)
+    return f, season
+
+
+def extra_momentum(df: pd.DataFrame) -> pd.DataFrame:
+    c = df["close"]; f = pd.DataFrame(index=df.index)
+    f["tech_mom_12_1"] = c.shift(21) / c.shift(252) - 1
+    f["tech_mom_6_1"] = c.shift(21) / c.shift(126) - 1
+    lr = np.log(c).diff()
+    f["tech_sharpe_126"] = lr.rolling(126).mean() / lr.rolling(126).std() * np.sqrt(252)
+    f["tech_max_dd_126"] = c / c.rolling(126).max() - 1
     return f
 
 
@@ -312,35 +378,64 @@ def targets(close: pd.Series) -> pd.DataFrame:
         t[f"y_ret_{name}"] = fwd
         t[f"y_up_{name}"] = (fwd > 0).astype(float).where(fwd.notna())
         fmax = pd.concat([close.shift(-i) for i in range(1, h + 1)], axis=1).max(axis=1) / close - 1
-        fmax = fmax.where(close.shift(-h).notna())
-        for thr in config.GAIN_THRESHOLDS:
-            t[f"y_gain{int(thr * 100)}_{name}"] = (fmax > thr).astype(float).where(fmax.notna())
+        t[f"y_maxret_{name}"] = fmax.where(fwd.notna())
     return t
 
 
-def build_panel(prices: dict[str, pd.DataFrame], macro: pd.DataFrame,
-                earnings: dict[str, list], tickers: list[str]) -> tuple[pd.DataFrame, dict]:
-    """Stacked (date, ticker) panel of features + targets for all tickers."""
-    mkt = market_features(prices, macro)
-    frames, extras = [], {}
+# --------------------------------------------------------------------------- panel
+def sector_etf_for(t: str, fund: dict) -> tuple[str, str]:
+    """(SPDR sector ETF, relative-strength ETF) for a ticker."""
+    sec = (fund.get(t) or {}).get("sector")
+    spdr = config.SECTOR_ETF.get(sec, config.DEFAULT_SECTOR)
+    return spdr, config.INDUSTRY_ETF_OVERRIDE.get(t, spdr)
+
+
+def _stock_block(args):
+    t, df, sec_df, mkt_df, events = args
+    tf = technical_features(df)
+    pf = pattern_features(df)
+    mf = extra_momentum(df)
+    rf = relative_features(df, sec_df, mkt_df)
+    ef, season = earnings_features(df.index, events)
+    out = pd.concat([tf, pf, mf, rf, ef, targets(df["close"])], axis=1)
+    out["earn_season"] = season.values
+    return t, out, support_resistance_levels(df)
+
+
+def build_panel(prices, macro, earnings, fund, tickers) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+    from concurrent.futures import ProcessPoolExecutor
+    mkt, sect_rank, labels = market_features(prices, macro, tickers)
+    spx = prices[config.MARKET["spx"]]
+    jobs = []
     for t in tickers:
         if t not in prices:
             continue
-        df = prices[t]
-        sec = prices.get(config.SECTOR_MAP.get(t, config.DEFAULT_SECTOR), prices[config.MARKET["spx"]])
-        f = pd.concat([technical_features(df), pattern_features(df),
-                       relative_features(df, sec, prices[config.MARKET["spx"]]),
-                       earnings_features(df.index, earnings.get(t, []))], axis=1)
-        f = f.join(mkt, how="left")
-        f = f.join(targets(df["close"])).copy()
-        f["ticker"] = t
-        f["close"] = df["close"]
-        frames.append(f.iloc[200:])     # drop warm-up rows
-        extras[t] = {"sr": support_resistance_levels(df)}
+        spdr, rel_etf = sector_etf_for(t, fund)
+        jobs.append((t, prices[t], prices.get(rel_etf, spx), spx, earnings.get(t, [])))
+    frames, extras = [], {}
+    workers = os.cpu_count() if config.N_JOBS == -1 else config.N_JOBS
+    with ProcessPoolExecutor(max_workers=max(1, workers)) as ex:
+        for t, f, sr in ex.map(_stock_block, jobs, chunksize=4):
+            spdr, _ = sector_etf_for(t, fund)
+            if spdr in sect_rank:
+                f["sect_rank63"] = sect_rank[spdr].reindex(f.index)
+            f = f.join(mkt, how="left").join(labels, how="left")
+            f["ticker"] = t; f["close"] = prices[t]["close"]
+            frames.append(f.iloc[252:].copy())
+            extras[t] = {"sr": sr}
     panel = pd.concat(frames).reset_index(names="date").sort_values(["date", "ticker"]).reset_index(drop=True)
     panel = panel.replace([np.inf, -np.inf], np.nan)
-    return panel, extras
+    # relative (cross-sectional) targets: did the stock beat the average stock in the universe?
+    for name in config.HORIZONS:
+        r = panel[f"y_ret_{name}"]
+        panel[f"y_xup_{name}"] = (r > panel.groupby("date")[f"y_ret_{name}"].transform("mean")).astype(float).where(r.notna())
+    # cross-sectional ranks (point-in-time: computed within each date)
+    for c in ("tech_mom_12_1", "tech_ret_21d", "rel_vs_mkt_63d", "tech_vol_63d", "fund_last_surprise"):
+        if c in panel:
+            panel[f"xs_{c}"] = panel.groupby("date")[c].rank(pct=True)
+    return panel, extras, mkt
 
 
 def feature_columns(panel: pd.DataFrame) -> list[str]:
-    return [c for c in panel.columns if any(c.startswith(p) for p in FAMILY_PREFIX)]
+    pre = tuple(FAMILY_PREFIX) + ("xs_",)
+    return [c for c in panel.columns if c.startswith(pre)]
