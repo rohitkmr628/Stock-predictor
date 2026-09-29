@@ -1,9 +1,18 @@
-name: Daily predictions
+name: Odds Board
 
 on:
   schedule:
-    - cron: "15 12 * * 1-5"   # 8:15 AM New York time, weekdays
-  workflow_dispatch: {}
+    - cron: "15 12 * * 1-5"   # 8:15 AM New York (EDT) - before the open, daily mode
+    - cron: "30 20 * * 1-5"   # 4:30 PM New York (EDT) - after the close, daily mode
+    - cron: "0 10 * * 6"      # Saturday - full rebuild: universe screen + backtest
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "daily (fast) or full (universe + backtest, ~30-60 min)"
+        required: true
+        default: daily
+        type: choice
+        options: [daily, full]
 
 permissions:
   contents: write
@@ -12,12 +21,15 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 300
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,14 +37,24 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Choose mode
+        id: mode
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            if [ "${{ github.event.schedule }}" = "0 10 * * 6" ]; then MODE=full; else MODE=daily; fi
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Running in $MODE mode"
       - name: Run model
-        run: python run.py --out site
-      - name: Save latest results
+        run: python run.py --mode ${{ steps.mode.outputs.mode }} --out site
+      - name: Save results and model state
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add site/results.json site/index.html
-          git commit -m "Daily predictions $(date -u +%F)" || echo "No changes"
+          git add site/results.json site/index.html model_state/
+          git commit -m "Odds Board ${{ steps.mode.outputs.mode }} run $(date -u +%F-%H%M)" || echo "No changes"
+          git pull --rebase --autostash || true
           git push
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
